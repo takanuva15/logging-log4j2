@@ -275,10 +275,13 @@ public class ExceptionResolver implements EventResolver {
         final String truncationSuffix = readTruncationSuffix(context, config);
         final List<String> truncationPointMatcherStrings = readTruncationPointMatcherStrings(config);
         final List<String> truncationPointMatcherRegexes = readTruncationPointMatcherRegexes(config);
+        final List<String> packageExclusionPrefixes = readPackageExclusionPrefixes(config);
+        final List<String> packageExclusionRegexes = readPackageExclusionRegexes(config);
 
         // Create the resolver.
         final StackTraceStringResolver resolver = new StackTraceStringResolver(
-                context, truncationSuffix, truncationPointMatcherStrings, truncationPointMatcherRegexes);
+                context, truncationSuffix, truncationPointMatcherStrings, truncationPointMatcherRegexes,
+                packageExclusionPrefixes, packageExclusionRegexes);
 
         // Create the null-protected resolver.
         return (final LogEvent logEvent, final JsonWriter jsonWriter) -> {
@@ -328,6 +331,37 @@ public class ExceptionResolver implements EventResolver {
         }
 
         // Return the extracted regexes.
+        return regexes;
+    }
+
+    private static List<String> readPackageExclusionPrefixes(final TemplateResolverConfig config) {
+        List<String> strings = config.getList(
+                new String[] {"stackTrace", "stringified", "truncation", "packageExclusionPrefixes"}, String.class);
+        if (strings == null) {
+            strings = Collections.emptyList();
+        }
+        return strings;
+    }
+
+    private static List<String> readPackageExclusionRegexes(final TemplateResolverConfig config) {
+        List<String> regexes = config.getList(
+                new String[] {"stackTrace", "stringified", "truncation", "packageExclusionRegexes"}, String.class);
+        if (regexes == null) {
+            regexes = Collections.emptyList();
+        }
+
+        // Check the regex syntax.
+        for (int i = 0; i < regexes.size(); i++) {
+            final String regex = regexes.get(i);
+            try {
+                Pattern.compile(regex);
+            } catch (final PatternSyntaxException error) {
+                final String message =
+                        String.format("invalid package exclusion regex at index %d: %s", i, regex);
+                throw new IllegalArgumentException(message, error);
+            }
+        }
+
         return regexes;
     }
 

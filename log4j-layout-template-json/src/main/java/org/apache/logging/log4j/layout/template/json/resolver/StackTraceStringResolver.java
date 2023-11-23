@@ -43,11 +43,19 @@ final class StackTraceStringResolver implements StackTraceResolver {
 
     private final List<Pattern> groupedTruncationPointMatcherRegexes;
 
+    private final boolean packageExclusionEnabled;
+
+    private final List<String> packageExclusionPrefixes;
+
+    private final List<Pattern> groupedPackageExclusionRegexes;
+
     StackTraceStringResolver(
             final EventResolverContext context,
             final String truncationSuffix,
             final List<String> truncationPointMatcherStrings,
-            final List<String> truncationPointMatcherRegexes) {
+            final List<String> truncationPointMatcherRegexes,
+            final List<String> packageExclusionPrefixes,
+            final List<String> packageExclusionRegexes) {
         final Supplier<TruncatingBufferedPrintWriter> writerSupplier =
                 () -> TruncatingBufferedPrintWriter.ofCapacity(context.getMaxStringByteCount());
         final RecyclerFactory recyclerFactory = context.getRecyclerFactory();
@@ -58,6 +66,9 @@ final class StackTraceStringResolver implements StackTraceResolver {
         this.truncationSuffix = truncationSuffix;
         this.truncationPointMatcherStrings = truncationPointMatcherStrings;
         this.groupedTruncationPointMatcherRegexes = groupTruncationPointMatcherRegexes(truncationPointMatcherRegexes);
+        this.packageExclusionEnabled = !packageExclusionPrefixes.isEmpty() || !packageExclusionRegexes.isEmpty();
+        this.packageExclusionPrefixes = packageExclusionPrefixes;
+        this.groupedPackageExclusionRegexes = groupTruncationPointMatcherRegexes(packageExclusionRegexes);
     }
 
     private static List<Pattern> groupTruncationPointMatcherRegexes(final List<String> regexes) {
@@ -87,7 +98,7 @@ final class StackTraceStringResolver implements StackTraceResolver {
             final Consumer<TruncatingBufferedPrintWriter> effectiveWriterConsumer) {
 
         // Short-circuit if truncation is not enabled.
-        if (!truncationEnabled) {
+        if (!truncationEnabled && !packageExclusionEnabled) {
             effectiveWriterConsumer.accept(srcWriter);
             return;
         }
@@ -97,7 +108,17 @@ final class StackTraceStringResolver implements StackTraceResolver {
         try {
             final CharSequencePointer sequencePointer = sequencePointerRecycler.acquire();
             try {
-                truncate(srcWriter, dstWriter, sequencePointer);
+                if (truncationEnabled) {
+                    truncate(srcWriter, dstWriter, sequencePointer);
+                }
+                if (packageExclusionEnabled) {
+                    if (truncationEnabled) {
+                        srcWriter.position(0);
+                        srcWriter.append(dstWriter);
+                        dstWriter.position(0);
+                    }
+                    excludePackages(srcWriter, dstWriter, sequencePointer);
+                }
             } finally {
                 sequencePointerRecycler.release(sequencePointer);
             }
@@ -285,5 +306,85 @@ final class StackTraceStringResolver implements StackTraceResolver {
             }
         }
         return -1;
+    }
+
+    private void excludePackages(
+            final TruncatingBufferedPrintWriter srcWriter,
+            final TruncatingBufferedPrintWriter dstWriter,
+            final CharSequencePointer sequencePointer) {
+        int startIndex = 0;
+        int numFilteredLines = 0;
+        for (; ; ) {
+            final int lineEndIndex = findLineStartIndex(srcWriter, startIndex, srcWriter.length());
+            if (lineEndIndex == -1) {
+                dstWriter.append(System.lineSeparator());
+                break;
+            }
+
+            final boolean doesLineStartWPkgToFilter = doesLineStartWithPkgExclusion(srcWriter, startIndex,
+                    lineEndIndex, sequencePointer);
+            if (!doesLineStartWPkgToFilter) {
+                // must write "suppressed" count before new log line
+                if (numFilteredLines > 0) {
+                    dstWriter.append("\t... suppressed " + numFilteredLines + " line(s)");
+                    dstWriter.append(System.lineSeparator());
+                    numFilteredLines = 0;
+                }
+                dstWriter.append(srcWriter, startIndex, lineEndIndex - 1);
+            } else {
+                numFilteredLines += 1;
+            }
+            startIndex = lineEndIndex;
+        }
+    }
+
+    // A Trie has theoretically better runtime, but adjacent memory lookups are fast in practice
+    private boolean doesLineStartWithPkgExclusion(
+            final CharSequence buffer,
+            final int lineStartIndex,
+            final int lineEndIndex,
+            final CharSequencePointer sequencePointer) {
+        int currIndex = lineStartIndex;
+        if (currIndex + 4 >= lineEndIndex || !(
+                buffer.charAt(currIndex) == '\t' &&
+                buffer.charAt(currIndex + 1) == 'a' &&
+                buffer.charAt(currIndex + 2) == 't' &&
+                buffer.charAt(currIndex + 3) == ' '
+        )) {
+            return false;
+        }
+        currIndex += 4;
+        //noinspection ForLoopReplaceableByForEach (avoid iterator allocation)
+        toNextPkgPrefix: for (int i = 0; i < packageExclusionPrefixes.size(); i++) {
+            final String pkg = packageExclusionPrefixes.get(i);
+            if (currIndex + pkg.length() > lineEndIndex) {
+                continue; // skip checking this package if its length is longer than the remaining buffer
+            }
+            for (int j = 0; j < pkg.length(); j++) {
+                if (buffer.charAt(currIndex + j) != pkg.charAt(j)) {
+                    continue toNextPkgPrefix;
+                }
+            }
+            return true;
+        }
+
+        // Check for regex matches (more expensive so it's checked second)
+        CharSequence sequence;
+        if (lineStartIndex == 0 && lineEndIndex == buffer.length()) {
+            sequence = buffer;
+        } else {
+            sequencePointer.reset(buffer, lineStartIndex, lineEndIndex);
+            sequence = sequencePointer;
+        }
+        // noinspection ForLoopReplaceableByForEach (avoid iterator allocation)
+        for (int i = 0; i < groupedPackageExclusionRegexes.size(); i++) {
+            final Pattern pattern = groupedPackageExclusionRegexes.get(i);
+            final Matcher matcher = pattern.matcher(sequence);
+            if (matcher.matches()) {
+                return true;
+            }
+        }
+
+        return false;
     }
 }

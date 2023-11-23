@@ -650,4 +650,134 @@ class StackTraceStringResolverTest {
             super(message);
         }
     }
+
+    ////////////////////////////////////////////////////////////////////////////
+    // tests with `packageExclusionPrefixes` //////////////////////////////
+    ////////////////////////////////////////////////////////////////////////////
+    
+    @Nested
+    class WithPackageExclusionPrefixes extends AbstractTestCases {
+        WithPackageExclusionPrefixes() {
+            super(true);
+        }
+
+        @Override
+        void assertSerializedException(final Throwable exception, final String regex) {
+            assertSerializedExceptionWithPackageExclusionPrefixes(exception, regex);
+        }
+
+        private void assertSerializedExceptionWithPackageExclusionPrefixes(final Throwable exception, final String regex) {
+
+            // Create the event template.
+            final List<String> pointMatcherStrings = packageExclusionPrefixes();
+            final Map<String, ?> exceptionResolverTemplate = asMap(
+                    "$resolver", "exception",
+                    "field", "stackTrace",
+                    "stackTrace",
+                    asMap(
+                            "stringified",
+                            asMap(
+                                    "truncation",
+                                    asMap(
+                                            "packageExclusionPrefixes", pointMatcherStrings))));
+
+            // Check the serialized event.
+            AbstractTestCases.assertSerializedException(
+                    exceptionResolverTemplate,
+                    exception,
+                    serializedExceptionAssert -> serializedExceptionAssert.matches(regex));
+        }
+
+        private List<String> packageExclusionPrefixes() {
+            final Throwable exception1 = exception1();
+            final Throwable exception2 = exception2();
+            final Throwable exception3 = exception3();
+            return Stream.of(exception1, exception2, exception3)
+                    .map(ex -> ex.getClass().getPackage().toString())
+                    .collect(Collectors.toList());
+        }
+
+        @Test
+        void package_exclusion_prefixes_should_work() {
+
+            // Create the exception to be logged.
+            final Throwable parentError = exception1();
+            final Throwable childError = exception3();
+            parentError.initCause(childError);
+
+            // Create the event template.
+            final String eventTemplate = writeJson(asMap(
+                    // Exception matcher using strings
+                    "stringMatchedEx",
+                    asMap(
+                            "$resolver", "exception",
+                            "field", "stackTrace",
+                            "stackTrace",
+                            asMap(
+                                    "stringified",
+                                    asMap(
+                                            "truncation",
+                                            asMap(
+                                                    "packageExclusionPrefixes",
+                                                    Arrays.asList(
+                                                            "this string shouldn't match with anything",
+//                                                            "org.junit",
+                                                            packageExclusionPrefix(parentError))),
+                                                    "packageExclusionRegexes",
+                                                    Arrays.asList(
+                                                            "this string shouldn't match with anything",
+                                                            "(org|java)")
+                                    )))
+            ));
+
+            // Create the layout.
+            final JsonTemplateLayout layout = JsonTemplateLayout.newBuilder()
+                    .setConfiguration(CONFIGURATION)
+                    .setEventTemplate(eventTemplate)
+                    .build();
+
+            // Create the log event.
+            final LogEvent logEvent =
+                    Log4jLogEvent.newBuilder().setThrown(parentError).build();
+
+            // Check the serialized event.
+            usingSerializedLogEventAccessor(layout, logEvent, accessor -> {
+
+                // Check the raw parent exception.
+//                final String exPattern =
+//                        EXCEPTION_REGEX_FLAGS + exception1Regex(false) + "\nCaused by: " + exception3Regex(false);
+//                assertThat(accessor.getString("ex")).matches(exPattern);
+
+                // Check the matcher usage on parent exception.
+                final String matchedExPattern =
+                        EXCEPTION_REGEX_FLAGS + exception1Regex(true) + "\nCaused by: " + exception3Regex(false);
+                String tmp = accessor.getString("stringMatchedEx");
+                assertThat(accessor.getString("stringMatchedEx")).matches(matchedExPattern);
+//                assertThat(accessor.getString("regexMatchedEx")).matches(matchedExPattern);
+
+                // Check the raw child exception.
+//                final String rootExPattern = EXCEPTION_REGEX_FLAGS + exception3Regex(false);
+//                assertThat(accessor.getString("rootEx")).matches(rootExPattern);
+
+                // Check the matcher usage on child exception.
+//                final String matchedRootExPattern = EXCEPTION_REGEX_FLAGS + exception3Regex(true);
+//                assertThat(accessor.getString("stringMatchedRootEx")).matches(matchedRootExPattern);
+//                assertThat(accessor.getString("regexMatchedRootEx")).matches(matchedRootExPattern);
+            });
+        }
+
+        private String packageExclusionPrefix(final Throwable exception) {
+            final StackTraceElement stackTraceElement = exception.getStackTrace()[0];
+            final String className = stackTraceElement.getClassName();
+            final String moduleName;
+            if (Constants.JAVA_MAJOR_VERSION > 8) {
+                moduleName = assertDoesNotThrow(() -> (String) StackTraceElement.class
+                        .getDeclaredMethod("getModuleName")
+                        .invoke(stackTraceElement));
+            } else {
+                moduleName = null;
+            }
+            return moduleName != null ? moduleName + "/" + className : className;
+        }
+    }
 }
